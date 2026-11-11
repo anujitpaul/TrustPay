@@ -2,7 +2,6 @@
 pragma solidity ^0.8.20;
 
 import {Script, console2} from "forge-std/Script.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {TrustPay} from "../TrustPay.sol";
 
 /**
@@ -32,7 +31,7 @@ contract DeployTrustPay is Script {
         if (usdc.code.length == 0) revert UsdcHasNoCode(usdc);
 
         vm.startBroadcast();
-        trustPay = new TrustPay(IERC20(usdc));
+        trustPay = new TrustPay(usdc);
         vm.stopBroadcast();
 
         console2.log("TrustPay deployed at:", address(trustPay));

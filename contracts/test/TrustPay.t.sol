@@ -3,8 +3,6 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {TrustPay} from "../TrustPay.sol";
 import {DeployTrustPay} from "../script/DeployTrustPay.s.sol";
@@ -29,6 +27,90 @@ contract FalseToken {
     }
 }
 
+/// @dev Shared balance bookkeeping for the raw-return mock tokens.
+abstract contract RawMockBase {
+    mapping(address => uint256) public balanceOf;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function _move(address from, address to, uint256 amount) internal {
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+    }
+}
+
+/// @dev USDT-style: moves funds, returns no data at all.
+contract NoReturnToken is RawMockBase {
+    fallback() external {
+        (address from, address to, uint256 amount) = abi.decode(msg.data[4:], (address, address, uint256));
+        _move(from, to, amount);
+        assembly {
+            return(0, 0)
+        }
+    }
+}
+
+/// @dev Returns a 32-byte non-boolean word (2).
+contract WordTwoToken {
+    function transferFrom(address, address, uint256) external pure returns (uint256) {
+        return 2;
+    }
+}
+
+/// @dev Returns a non-empty payload shorter than 32 bytes (1 byte).
+contract ShortReturnToken {
+    fallback() external {
+        assembly {
+            mstore(0, shl(248, 1))
+            return(0, 1)
+        }
+    }
+}
+
+/// @dev Reverts with a custom error carrying arguments.
+contract CustomErrorToken {
+    error TokenBoom(uint256 code, address who);
+
+    function transferFrom(address from, address, uint256 amount) external pure returns (bool) {
+        revert TokenBoom(amount, from);
+    }
+}
+
+/// @dev Reverts with no revert data.
+contract EmptyRevertToken {
+    fallback() external {
+        assembly {
+            revert(0, 0)
+        }
+    }
+}
+
+/// @dev Moves funds and returns 64 bytes; first word is 1 (trailing word is garbage).
+contract LongReturnToken is RawMockBase {
+    fallback() external {
+        (address from, address to, uint256 amount) = abi.decode(msg.data[4:], (address, address, uint256));
+        _move(from, to, amount);
+        assembly {
+            mstore(0, 1)
+            mstore(32, 0xdead)
+            return(0, 64)
+        }
+    }
+}
+
+/// @dev Returns 64 bytes whose first word is NOT 1 (second word is 1).
+contract LongReturnBadFirstWordToken {
+    fallback() external {
+        assembly {
+            mstore(0, 0)
+            mstore(32, 1)
+            return(0, 64)
+        }
+    }
+}
+
 abstract contract TrustPayTestBase is Test {
     MockUSDC6 internal usdc;
     TrustPay internal pay;
@@ -40,7 +122,7 @@ abstract contract TrustPayTestBase is Test {
 
     function setUp() public virtual {
         usdc = new MockUSDC6();
-        pay = new TrustPay(IERC20(address(usdc)));
+        pay = new TrustPay(address(usdc));
         usdc.mint(alice, FUNDS);
         vm.prank(alice);
         usdc.approve(address(pay), type(uint256).max);
@@ -69,12 +151,12 @@ contract TrustPayTest is TrustPayTestBase {
 
     function test_Constructor_RevertsOnZeroAddress() public {
         vm.expectRevert(abi.encodeWithSelector(TrustPay.InvalidToken.selector, address(0)));
-        new TrustPay(IERC20(address(0)));
+        new TrustPay(address(0));
     }
 
     function test_Constructor_RevertsOnEOA() public {
         vm.expectRevert(abi.encodeWithSelector(TrustPay.InvalidToken.selector, bob));
-        new TrustPay(IERC20(bob));
+        new TrustPay(bob);
     }
 
     // ---------------- pay: happy path ----------------
@@ -203,9 +285,9 @@ contract TrustPayTest is TrustPayTestBase {
 
     function test_FailedTransferRollsBack_TokenReturnsFalse() public {
         FalseToken ft = new FalseToken();
-        TrustPay p2 = new TrustPay(IERC20(address(ft)));
+        TrustPay p2 = new TrustPay(address(ft));
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(SafeERC20.SafeERC20FailedOperation.selector, address(ft)));
+        vm.expectRevert(abi.encodeWithSelector(TrustPay.TransferFailed.selector, alice, bob, 1e6));
         p2.pay(bob, 1e6, "");
         assertEq(p2.paymentCount(), 0);
     }
@@ -289,6 +371,130 @@ contract TrustPayTest is TrustPayTestBase {
             assertEq(usdc.balanceOf(recipient), recBefore + amount);
         }
         assertEq(usdc.balanceOf(address(pay)), 0);
+    }
+}
+
+// ---------------- token return-data compatibility ----------------
+
+contract TrustPayTokenCompatTest is Test {
+    address internal alice = makeAddr("alice");
+    address internal bob = makeAddr("bob");
+
+    function _expectTransferFailed(uint256 amount) internal {
+        vm.expectRevert(abi.encodeWithSelector(TrustPay.TransferFailed.selector, alice, bob, amount));
+    }
+
+    // (1) USDT-style: no return data -> success, funds move
+    function test_NoReturnData_SucceedsAndMovesFunds() public {
+        NoReturnToken t = new NoReturnToken();
+        TrustPay p = new TrustPay(address(t));
+        t.mint(alice, 100e6);
+        vm.expectEmit(true, true, true, true, address(p));
+        emit TrustPay.PaymentSent(1, alice, bob, 40e6, "usdt");
+        vm.prank(alice);
+        assertEq(p.pay(bob, 40e6, "usdt"), 1);
+        assertEq(p.paymentCount(), 1);
+        assertEq(t.balanceOf(alice), 60e6);
+        assertEq(t.balanceOf(bob), 40e6);
+        assertEq(t.balanceOf(address(p)), 0);
+    }
+
+    // (2) returns false -> TransferFailed, count stays 0
+    function test_ReturnsFalse_RevertsTransferFailed() public {
+        FalseToken t = new FalseToken();
+        TrustPay p = new TrustPay(address(t));
+        vm.prank(alice);
+        _expectTransferFailed(7e6);
+        p.pay(bob, 7e6, "n");
+        assertEq(p.paymentCount(), 0);
+    }
+
+    // (3) returns 32-byte word 2 -> TransferFailed
+    function test_ReturnsWordTwo_RevertsTransferFailed() public {
+        WordTwoToken t = new WordTwoToken();
+        TrustPay p = new TrustPay(address(t));
+        vm.prank(alice);
+        _expectTransferFailed(5);
+        p.pay(bob, 5, "");
+        assertEq(p.paymentCount(), 0);
+    }
+
+    // (4) returns <32 non-empty bytes -> TransferFailed
+    function test_ReturnsShortData_RevertsTransferFailed() public {
+        ShortReturnToken t = new ShortReturnToken();
+        TrustPay p = new TrustPay(address(t));
+        vm.prank(alice);
+        _expectTransferFailed(9);
+        p.pay(bob, 9, "");
+        assertEq(p.paymentCount(), 0);
+    }
+
+    // (5) custom error revert data bubbled unchanged
+    function test_CustomErrorRevert_IsBubbledUnchanged() public {
+        CustomErrorToken t = new CustomErrorToken();
+        TrustPay p = new TrustPay(address(t));
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(CustomErrorToken.TokenBoom.selector, 123, alice));
+        p.pay(bob, 123, "");
+        assertEq(p.paymentCount(), 0);
+    }
+
+    // (6) empty revert data -> TransferFailed
+    function test_EmptyRevert_YieldsTransferFailed() public {
+        EmptyRevertToken t = new EmptyRevertToken();
+        TrustPay p = new TrustPay(address(t));
+        vm.prank(alice);
+        _expectTransferFailed(11);
+        p.pay(bob, 11, "");
+        assertEq(p.paymentCount(), 0);
+    }
+
+    // (7) 64 bytes, first word 1 -> success
+    function test_LongReturnFirstWordOne_Succeeds() public {
+        LongReturnToken t = new LongReturnToken();
+        TrustPay p = new TrustPay(address(t));
+        t.mint(alice, 10e6);
+        vm.prank(alice);
+        assertEq(p.pay(bob, 3e6, "long"), 1);
+        assertEq(p.paymentCount(), 1);
+        assertEq(t.balanceOf(alice), 7e6);
+        assertEq(t.balanceOf(bob), 3e6);
+    }
+
+    // extra: 64 bytes whose first word is not 1 -> TransferFailed
+    function test_LongReturnBadFirstWord_RevertsTransferFailed() public {
+        LongReturnBadFirstWordToken t = new LongReturnBadFirstWordToken();
+        TrustPay p = new TrustPay(address(t));
+        vm.prank(alice);
+        _expectTransferFailed(2);
+        p.pay(bob, 2, "");
+        assertEq(p.paymentCount(), 0);
+    }
+
+    function testFuzz_NonCanonicalWord_Reverts(uint256 word) public {
+        vm.assume(word != 1);
+        address t = address(new WordFuzzToken(word));
+        TrustPay p = new TrustPay(t);
+        vm.prank(alice);
+        _expectTransferFailed(1);
+        p.pay(bob, 1, "");
+        assertEq(p.paymentCount(), 0);
+    }
+}
+
+contract WordFuzzToken {
+    uint256 internal immutable WORD;
+
+    constructor(uint256 w) {
+        WORD = w;
+    }
+
+    fallback() external {
+        uint256 w = WORD;
+        assembly {
+            mstore(0, w)
+            return(0, 32)
+        }
     }
 }
 

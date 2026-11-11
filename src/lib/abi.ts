@@ -11,6 +11,7 @@ export const trustPayAbi = parseAbi([
   'error InvalidRecipient(address recipient)',
   'error ZeroAmount()',
   'error NoteTooLong(uint256 length, uint256 maximum)',
+  'error TransferFailed(address from, address to, uint256 amount)',
 ])
 
 export const paymentSentEvent = parseAbiItem(
