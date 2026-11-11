@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="generator" content="Arc Studio by Circle — https://studio.arc.io" />
+    <title>TrustPay</title>
+    <meta name="description" content="Simple USDC payments on Arc Mainnet." />
+    <meta name="theme-color" content="#080D18" />
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('trustpay:theme');
+          var theme = saved === 'light' ? 'light' : 'dark';
+          document.documentElement.dataset.theme = theme;
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', theme === 'light' ? '#F3F6FB' : '#080D18');
+        } catch (e) {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      })();
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+    />
+  </head>
+  <body>
+    <!-- Built with Arc Studio — https://studio.arc.io -->
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
